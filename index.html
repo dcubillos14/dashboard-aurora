@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html lang="es-CL">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>Implementaciones Aurora</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --font-serif: Georgia, "Times New Roman", serif;
+    --color-fg: #1f1e1d; --color-fg-muted: #6b6a66; --color-bg: #f6f5f1; --color-panel: #ffffff;
+    --color-border-line: #e2e0d9; --color-ok: #2f7d4f; --color-warn: #a86a00; --color-bad: #c0392b;
+    --cds-font-size-caption: 12px; --cds-font-size-body: 15px; --cds-font-size-heading: 16px; --cds-font-size-title: 28px;
+    --cds-font-weight-medium: 600;
+    --cds-gap-xs: 4px; --cds-gap-sm: 8px; --cds-gap-md: 12px; --cds-gap-lg: 20px; --cds-gap-xl: 32px;
+    --cds-pad-xs: 4px; --cds-pad-sm: 8px; --cds-pad-md: 12px; --cds-pad-lg: 16px; --cds-pad-xl: 24px;
+    --cds-radius: 10px;
+    --cds-chart-grid: #ebe9e3; --cds-chart-axis: #c9c6bd; --cds-chart-muted: #b9b6ad; --cds-text-secondary: #6b6a66;
+    --cds-surface-popover: #ffffff; --cds-border: #d9d6ce; --cds-shadow-popover: 0 4px 16px rgba(0,0,0,.12);
+    --s0: #2f6bd8; --s1: #e09a2b; --s2: #9aa3b2; --s3: #d1493f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --color-fg: #ecebe7; --color-fg-muted: #a5a39c; --color-bg: #1b1b1a; --color-panel: #252524;
+      --color-border-line: #3a3936; --color-warn: #e0a640; --color-bad: #ef6b5f;
+      --cds-chart-grid: #3a3936; --cds-chart-axis: #55534e; --cds-chart-muted: #6d6b65; --cds-text-secondary: #a5a39c;
+      --cds-surface-popover: #2e2e2c; --cds-border: #45443f; --cds-shadow-popover: 0 4px 16px rgba(0,0,0,.5);
+      --s0: #5b8ff0; --s1: #e9ac4a; --s2: #7d8696; --s3: #ef6b5f;
+    }
+  }
+  html { background: var(--color-bg); }
+  body { margin: 0; color: var(--color-fg); font-family: var(--font-sans); }
+  #dash-root { max-width: 1240px; margin: 0 auto; padding: 24px 20px 48px; }
+  .dash-select { font: inherit; font-size: 13px; color: var(--color-fg); background-color: var(--color-panel);
+    border: 1px solid var(--color-border-line); border-radius: 8px; padding: 5px 8px; max-width: 100%; }
+  .dash-skeleton { color: transparent !important; background: var(--cds-chart-grid); border-radius: 6px; min-width: 3ch; display: inline-block; }
+  .sitio-estado { font-size: 12px; color: var(--color-fg-muted); margin: 0 0 12px; }
+  .sitio-bloqueo { max-width: 520px; margin: 80px auto; padding: 24px; background: var(--color-panel);
+    border: 1px solid var(--color-border-line); border-radius: 12px; text-align: center; line-height: 1.5; }
+  .sitio-bloqueo h1 { font-family: var(--font-serif); font-weight: 400; font-size: 24px; margin: 0 0 8px; }
+</style>
+<script src="d3.v7.min.js"></script>
+<script>
+  // Motor mínimo del panel: guarda cargadores, cálculos y dibujos, y los ejecuta con los datos descifrados.
+  window.dash = (() => {
+    const loaders = {}, calcs = {}, draws = {}, onDatas = [];
+    const defaults = {proyecto: '', estado_pend: ''};
+    let params = {...defaults}, answer = null, status = 'loading', message = '';
+    const values = {};
+    function recompute() {
+      for (const k of Object.keys(values)) delete values[k];
+      if (status !== 'ok') return;
+      const done = new Set();
+      for (const [id, l] of Object.entries(loaders)) { values[id] = l.fn({answer}).data; done.add(id); }
+      let pending = Object.keys(calcs);
+      for (let guard = 0; pending.length && guard < 50; guard++) {
+        pending = pending.filter((id) => {
+          const c = calcs[id];
+          if (!c.inputs.every((i) => done.has(i))) return true;
+          values[id] = c.fn(...c.inputs.map((i) => values[i]));
+          done.add(id);
+          return false;
+        });
+      }
+    }
+    function redraw() {
+      for (const f of onDatas) { try { f(); } catch (e) { console.error(e); } }
+      for (const [name, f] of Object.entries(draws)) {
+        document.querySelectorAll(`[data-draw="${name}"]`).forEach((el) => {
+          if (el.closest('[hidden]')) return;
+          try { f(el); } catch (e) { console.error(name, e); }
+        });
+      }
+    }
+    return {
+      loader: (id, o) => { loaders[id] = o; },
+      calc: (id, o) => { calcs[id] = o; },
+      data: (id) => (status === 'ok' ? {status, data: values[id], columns: [], message: ''} : {status, data: id in calcs ? null : [], message}),
+      params: () => ({...params}),
+      setParams: (p) => { params = {...params, ...p}; recompute(); redraw(); },
+      resetParams: () => { params = {...defaults}; recompute(); redraw(); },
+      draw: (name, f) => { draws[name] = typeof f === 'function' ? f : (el) => f.update(el, f.mount && f.mount(el)); },
+      onData: (f) => { onDatas.push(f); },
+      colors: ['var(--s0)', 'var(--s1)', 'var(--s2)', 'var(--s3)'],
+      setLink: () => {}, refresh: () => {},
+      _set: (a) => { answer = a; status = 'ok'; recompute(); redraw(); },
+      _redraw: () => redraw(),
+    };
+  })();
+</script>
+</head>
+<body>
+<div id="dash-root">
+<p class="sitio-estado" id="sitio-estado" hidden></p>
+<div class="sitio-bloqueo" id="sitio-bloqueo"><h1>Implementaciones Aurora</h1><p id="sitio-bloqueo-msg">Cargando…</p></div>
+<style>
+  .au-page { display: flex; flex-direction: column; gap: var(--cds-gap-lg); font-family: var(--font-sans); color: var(--color-fg); }
+  .au-head { display: flex; flex-direction: column; gap: var(--cds-gap-sm); }
+  .au-title { font-family: var(--font-serif); font-weight: 400; font-size: var(--cds-font-size-title); margin: 0; }
+  .au-lede { margin: 0; font-size: var(--cds-font-size-body); line-height: 1.5; max-width: 70ch; }
+  .au-lede b { font-weight: var(--cds-font-weight-medium); }
+  .au-num { font-variant-numeric: tabular-nums; }
+  .au-filter { display: flex; align-items: center; gap: var(--cds-gap-sm); font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); }
+  .au-filter .dash-select { min-width: 0; max-width: 100%; }
+  .au-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr)); gap: var(--cds-gap-md); }
+  .au-card { background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); padding: var(--cds-pad-lg); min-width: 0; }
+  .au-kpi-label { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); }
+  .au-kpi-value { font-family: var(--font-serif); font-weight: 400; font-size: var(--cds-font-size-title); font-variant-numeric: tabular-nums; line-height: 1.2; margin-top: var(--cds-gap-xs); }
+  .au-kpi-sub { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); margin-top: var(--cds-gap-xs); }
+  .au-kpi-warn .au-kpi-value { color: var(--color-warn); }
+  .au-progress { height: 6px; border-radius: 3px; background: var(--cds-chart-grid); margin-top: var(--cds-gap-sm); overflow: hidden; }
+  .au-progress > div { height: 100%; border-radius: 3px; }
+  .au-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: var(--cds-gap-md); }
+  .au-h2 { font-size: var(--cds-font-size-heading); font-weight: var(--cds-font-weight-medium); margin: 0; }
+  .au-note { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); margin: var(--cds-gap-xs) 0 var(--cds-gap-sm); }
+  .au-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--cds-gap-sm); }
+  .au-legend { display: flex; flex-wrap: wrap; gap: var(--cds-gap-xs) var(--cds-gap-md); list-style: none; padding: 0; margin: 0 0 var(--cds-gap-sm); font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); }
+  .au-legend li { display: flex; align-items: center; gap: 6px; }
+  .au-sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; background: var(--cds-chart-muted); }
+  .au-chart { position: relative; min-height: 240px; }
+  .au-chart svg { display: block; overflow: visible; }
+  .au-chart .au-axis text, .au-chart .au-lbl { fill: var(--cds-text-secondary); font-size: var(--cds-font-size-caption); font-family: var(--font-sans); }
+  .au-chart .au-end { fill: var(--color-fg); font-size: var(--cds-font-size-caption); font-variant-numeric: tabular-nums; font-family: var(--font-sans); }
+  .au-chart .au-base { stroke: var(--cds-chart-axis); }
+  .au-msg { color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); padding: var(--cds-pad-md) 0; }
+  .au-tip { position: absolute; pointer-events: none; background: var(--cds-surface-popover); border: 1px solid var(--cds-border); box-shadow: var(--cds-shadow-popover); border-radius: var(--cds-radius); padding: var(--cds-pad-xs) var(--cds-pad-sm); font-size: var(--cds-font-size-caption); line-height: 1.4; white-space: nowrap; z-index: 2; }
+  .au-tip strong { display: block; font-weight: var(--cds-font-weight-medium); }
+  .au-tip span { color: var(--cds-text-secondary); }
+  .au-scroll { overflow-x: auto; max-height: 520px; overflow-y: auto; }
+  .au-table { width: 100%; border-collapse: collapse; font-size: var(--cds-font-size-caption); font-variant-numeric: tabular-nums; }
+  .au-table th { text-align: left; font-weight: var(--cds-font-weight-medium); color: var(--color-fg-muted); padding: var(--cds-pad-xs) var(--cds-pad-sm); border-bottom: 1px solid var(--color-border-line); position: sticky; top: 0; background: var(--color-panel); white-space: nowrap; }
+  .au-table td { padding: var(--cds-pad-xs) var(--cds-pad-sm); border-bottom: 1px solid var(--color-border-line); white-space: nowrap; }
+  .au-table .au-r { text-align: right; }
+  .au-table td.au-wrap { white-space: normal; min-width: 12em; }
+  .au-table .au-warn { color: var(--color-warn); font-weight: var(--cds-font-weight-medium); }
+  .au-table .au-bad { color: var(--color-bad); font-weight: var(--cds-font-weight-medium); }
+  .au-notes { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); }
+  .au-notes ul { margin: var(--cds-gap-sm) 0 0; padding-left: 1.2em; }
+  [data-dash-source-state=refreshing] { opacity: .5; }
+</style>
+
+<div class="au-page" hidden>
+  <header class="au-head" id="encabezado">
+    <h1 class="au-title">Implementaciones Aurora</h1>
+    <p class="au-lede" id="resumen" data-read lang="es-CL"><b data-draw="txt" data-source="kpis" data-field="proyecto" data-row="0">—</b> lleva un <b class="au-num" data-draw="num" data-source="kpis" data-field="avance_pct" data-row="0">—</b>% de avance: <span class="au-num" data-draw="num" data-source="kpis" data-field="finalizadas" data-row="0">—</span> de <span class="au-num" data-draw="num" data-source="kpis" data-field="total" data-row="0">—</span> órdenes finalizadas. Quedan <b class="au-num" data-draw="num" data-source="kpis" data-field="pendientes" data-row="0">—</b> por cerrar (<span class="au-num" data-draw="num" data-source="kpis" data-field="en_proceso" data-row="0">—</span> en proceso y <span class="au-num" data-draw="num" data-source="kpis" data-field="abiertas" data-row="0">—</span> abiertas<span class="au-solo-inc" hidden>, más <span class="au-num" data-draw="num" data-source="kpis" data-field="incidencia" data-row="0">—</span> con incidencia</span>), y <b class="au-num" data-draw="num" data-source="kpis" data-field="sin_tecnico" data-row="0">—</b> siguen sin técnico asignado.</p>
+    <label class="au-filter" id="filtro-proyecto">Proyecto
+      <select class="dash-select" data-draw="proyecto" aria-label="Proyecto" data-source="proyectos"></select>
+    </label>
+  </header>
+
+  <section class="au-kpis" id="indicadores">
+    <div class="au-card" id="kpi-total">
+      <div class="au-kpi-label">Órdenes del proyecto</div>
+      <div class="au-kpi-value dash-skeleton" data-draw="num" data-source="kpis" data-field="total" data-row="0">—</div>
+      <div class="au-kpi-sub">En el módulo Implementaciones</div>
+    </div>
+    <div class="au-card" id="kpi-finalizadas">
+      <div class="au-kpi-label">Finalizadas</div>
+      <div class="au-kpi-value dash-skeleton" data-draw="num" data-source="kpis" data-field="finalizadas" data-row="0">—</div>
+      <div class="au-kpi-sub"><span class="au-num" data-draw="num" data-source="kpis" data-field="avance_pct" data-row="0">—</span>% de avance</div>
+      <div class="au-progress" data-draw="avance" data-source="kpis" role="img" aria-label="Barra de avance del proyecto"></div>
+    </div>
+    <div class="au-card" id="kpi-proceso">
+      <div class="au-kpi-label">En proceso</div>
+      <div class="au-kpi-value dash-skeleton" data-draw="num" data-source="kpis" data-field="en_proceso" data-row="0">—</div>
+      <div class="au-kpi-sub">Con técnico trabajando</div>
+    </div>
+    <div class="au-card" id="kpi-abiertas">
+      <div class="au-kpi-label">Abiertas</div>
+      <div class="au-kpi-value dash-skeleton" data-draw="num" data-source="kpis" data-field="abiertas" data-row="0">—</div>
+      <div class="au-kpi-sub">Aún sin iniciar</div>
+    </div>
+    <div class="au-card au-kpi-warn" id="kpi-sin-tecnico">
+      <div class="au-kpi-label">Sin técnico asignado</div>
+      <div class="au-kpi-value dash-skeleton" data-draw="num" data-source="kpis" data-field="sin_tecnico" data-row="0">—</div>
+      <div class="au-kpi-sub">Por cerrar con operador «Pendiente»</div>
+    </div>
+    <div class="au-card" id="kpi-otros" hidden>
+      <div class="au-kpi-label">Incidencia u otro estado</div>
+      <div class="au-kpi-value" data-draw="num" data-source="kpis" data-field="incidencia_otros" data-row="0">—</div>
+      <div class="au-kpi-sub">No cuentan como avance</div>
+    </div>
+  </section>
+
+  <section class="au-grid" id="graficos-avance">
+    <div class="au-card" id="sucursales">
+      <h2 class="au-h2">Avance por sucursal</h2>
+      <p class="au-note">Órdenes de cada sucursal por estado; al final, el total y el % finalizado.</p>
+      <ul class="au-legend" aria-hidden="true">
+        <li><i class="au-sw" data-sw="0"></i>Finalizada</li>
+        <li><i class="au-sw" data-sw="1"></i>En proceso</li>
+        <li><i class="au-sw" data-sw="2"></i>Abierta</li>
+        <li><i class="au-sw" data-sw="3"></i>Incidencia u otro</li>
+      </ul>
+      <div class="au-chart" data-draw="barras-sucursal" data-source="por_sucursal"></div>
+    </div>
+    <div class="au-card" id="tecnicos">
+      <h2 class="au-h2">Carga por técnico</h2>
+      <p class="au-note">Órdenes de cada técnico por estado, de más a menos trabajo por cerrar; al final, cuántas le quedan.</p>
+      <ul class="au-legend" aria-hidden="true">
+        <li><i class="au-sw" data-sw="0"></i>Finalizada</li>
+        <li><i class="au-sw" data-sw="1"></i>En proceso</li>
+        <li><i class="au-sw" data-sw="2"></i>Abierta</li>
+        <li><i class="au-sw" data-sw="3"></i>Incidencia u otro</li>
+      </ul>
+      <div class="au-chart" data-draw="barras-tecnico" data-source="por_tecnico"></div>
+    </div>
+  </section>
+
+  <section class="au-grid" id="graficos-detalle">
+    <div class="au-card" id="por-dia">
+      <h2 class="au-h2">Órdenes creadas por día</h2>
+      <p class="au-note">Cada barra es el lote de órdenes creado ese día en Aurora; la parte llena ya está finalizada.</p>
+      <div class="au-chart" data-draw="barras-dia" data-source="por_fecha"></div>
+    </div>
+    <div class="au-card" id="por-modelo">
+      <h2 class="au-h2">Por tipo y modelo</h2>
+      <p class="au-note">Órdenes y avance de cada modelo de equipo.</p>
+      <div class="au-scroll">
+        <table class="au-table" data-source="por_modelo" data-row-key="modelo">
+          <thead><tr>
+            <th data-field="tipo">Tipo</th>
+            <th data-field="modelo">Modelo</th>
+            <th data-field="total" class="au-r">Órdenes</th>
+            <th data-field="finalizada" class="au-r">Finalizadas</th>
+            <th data-field="avance_pct" class="au-r">% avance</th>
+          </tr></thead>
+          <tbody data-draw="tabla-modelo"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section class="au-card" id="por-cerrar">
+    <div class="au-row">
+      <h2 class="au-h2">Órdenes por cerrar</h2>
+      <select class="dash-select" data-draw="filtro-estado" aria-label="Estado de las órdenes por cerrar" data-source="pendientes"></select>
+    </div>
+    <p class="au-note">Órdenes del proyecto que todavía no están Finalizadas. Primero las que no tienen técnico, luego las más antiguas.</p>
+    <div class="au-scroll">
+      <table class="au-table" data-source="pendientes" data-row-key="codigo">
+        <thead><tr>
+          <th data-field="codigo">Código</th>
+          <th data-field="sucursal">Sucursal</th>
+          <th data-field="tecnico">Técnico</th>
+          <th data-field="modelo">Modelo</th>
+          <th data-field="serial">Serial</th>
+          <th data-field="estado">Estado</th>
+          <th data-field="fecha_creacion">Creación</th>
+        </tr></thead>
+        <tbody data-draw="tabla-pendientes"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <details class="au-notes" id="notas">
+    <summary>Cómo se calculan los números</summary>
+    <ul>
+      <li>% de avance = órdenes en estado Finalizada ÷ total de órdenes del proyecto.</li>
+      <li>"Sin técnico asignado" = órdenes que no están Finalizadas y cuyo operador en Aurora aparece como «Pendiente».</li>
+      <li>Incidencia y otros estados (Cerrada, DOA, En Revisión, etc.) se muestran aparte y no cuentan como avance.</li>
+      <li>Los datos vienen del módulo Implementaciones de Aurora (Gestión de Proyectos) y se actualizan cada hora en horario hábil.</li>
+    </ul>
+  </details>
+</div>
+
+<script>
+  // Cómo se leen los archivos y qué se calcula a partir de ellos.
+  dash.loader('ordenes', {
+    description: 'Toma la lista "ordenes" del archivo exportado desde Aurora: una fila por proyecto, sucursal, técnico, modelo, estado y día de creación, con su cantidad de órdenes.',
+    fn: ({answer}) => {
+      if (!answer || !Array.isArray(answer.ordenes)) throw new Error('El archivo no trae la lista "ordenes".');
+      return {
+        data: answer.ordenes,
+        columns: ['proyecto_id', 'proyecto', 'sucursal', 'tecnico', 'tipo', 'modelo', 'estado', 'fecha_creacion', 'ordenes'],
+        meta: [{label: 'Generado', value: String(answer.generado ?? '')}, {label: 'Fuente', value: String(answer.fuente ?? '')}],
+      };
+    },
+  });
+
+  dash.loader('pendientes', {
+    description: 'Toma la lista "pendientes" del archivo exportado desde Aurora: cada orden que no está Finalizada, con su código y serial.',
+    fn: ({answer}) => {
+      if (!answer || !Array.isArray(answer.pendientes)) throw new Error('El archivo no trae la lista "pendientes".');
+      return {
+        data: answer.pendientes,
+        columns: ['proyecto_id', 'proyecto', 'codigo', 'sucursal', 'tecnico', 'tipo', 'modelo', 'estado', 'fecha_creacion', 'serial'],
+        meta: [{label: 'Generado', value: String(answer.generado ?? '')}, {label: 'Fuente', value: String(answer.fuente ?? '')}],
+      };
+    },
+  });
+
+  dash.calc('proyectos', {
+    inputs: ['ordenes'],
+    title: 'Proyectos disponibles',
+    description: 'Cada proyecto del archivo con su total de órdenes, de mayor a menor.',
+    fn: (ordenes) => {
+      const tot = new Map();
+      for (const r of ordenes) tot.set(r.proyecto, (tot.get(r.proyecto) || 0) + Number(r.ordenes));
+      return [...tot].map(([proyecto, total]) => ({proyecto, total})).sort((a, b) => b.total - a.total);
+    },
+  });
+
+  dash.calc('proyecto_elegido', {
+    inputs: ['proyectos'],
+    title: 'Proyecto que se muestra',
+    description: 'El proyecto elegido en el filtro; si no hay uno elegido, el que tiene más órdenes.',
+    fn: (proyectos) => {
+      const pedido = dash.params().proyecto;
+      if (proyectos.some((r) => r.proyecto === pedido)) return pedido;
+      return proyectos.length ? proyectos[0].proyecto : null;
+    },
+  });
+
+  dash.calc('kpis', {
+    inputs: ['ordenes', 'proyecto_elegido'],
+    title: 'Indicadores del proyecto',
+    description: 'Totales por estado, % de avance (Finalizadas ÷ total) y órdenes por cerrar sin técnico.',
+    fn: (ordenes, proyecto) => {
+      const k = {proyecto, total: 0, finalizadas: 0, en_proceso: 0, abiertas: 0, incidencia: 0, incidencia_otros: 0, pendientes: 0, sin_tecnico: 0, avance_pct: 0};
+      for (const r of ordenes) {
+        if (r.proyecto !== proyecto) continue;
+        const n = Number(r.ordenes);
+        k.total += n;
+        if (r.estado === 'Finalizada') { k.finalizadas += n; continue; }
+        k.pendientes += n;
+        if (r.tecnico === 'Pendiente') k.sin_tecnico += n;
+        if (r.estado === 'En Proceso') k.en_proceso += n;
+        else if (r.estado === 'Abierta') k.abiertas += n;
+        else { k.incidencia_otros += n; if (r.estado === 'Incidencia') k.incidencia += n; }
+      }
+      k.avance_pct = k.total ? Math.round((k.finalizadas / k.total) * 100) : 0;
+      return proyecto ? [k] : [];
+    },
+  });
+
+  dash.calc('por_sucursal', {
+    inputs: ['ordenes', 'proyecto_elegido'],
+    title: 'Órdenes por sucursal y estado',
+    description: 'Para el proyecto elegido: órdenes de cada sucursal por estado y % finalizado.',
+    fn: (ordenes, proyecto) => {
+      const g = new Map();
+      for (const r of ordenes) {
+        if (r.proyecto !== proyecto) continue;
+        const n = Number(r.ordenes);
+        if (!g.has(r.sucursal)) g.set(r.sucursal, {sucursal: r.sucursal, total: 0, finalizada: 0, en_proceso: 0, abierta: 0, incidencia_otros: 0, por_cerrar: 0, avance_pct: 0});
+        const o = g.get(r.sucursal);
+        o.total += n;
+        if (r.estado === 'Finalizada') o.finalizada += n;
+        else if (r.estado === 'En Proceso') o.en_proceso += n;
+        else if (r.estado === 'Abierta') o.abierta += n;
+        else o.incidencia_otros += n;
+      }
+      for (const o of g.values()) { o.por_cerrar = o.total - o.finalizada; o.avance_pct = Math.round((o.finalizada / o.total) * 100); }
+      return [...g.values()].sort((a, b) => b.total - a.total || a.sucursal.localeCompare(b.sucursal));
+    },
+  });
+
+  dash.calc('por_tecnico', {
+    inputs: ['ordenes', 'proyecto_elegido'],
+    title: 'Órdenes por técnico y estado',
+    description: 'Para el proyecto elegido: órdenes de cada técnico por estado; «Pendiente» son las que no tienen técnico.',
+    fn: (ordenes, proyecto) => {
+      const g = new Map();
+      for (const r of ordenes) {
+        if (r.proyecto !== proyecto) continue;
+        const n = Number(r.ordenes);
+        if (!g.has(r.tecnico)) g.set(r.tecnico, {tecnico: r.tecnico, total: 0, finalizada: 0, en_proceso: 0, abierta: 0, incidencia_otros: 0, por_cerrar: 0, avance_pct: 0});
+        const o = g.get(r.tecnico);
+        o.total += n;
+        if (r.estado === 'Finalizada') o.finalizada += n;
+        else if (r.estado === 'En Proceso') o.en_proceso += n;
+        else if (r.estado === 'Abierta') o.abierta += n;
+        else o.incidencia_otros += n;
+      }
+      for (const o of g.values()) { o.por_cerrar = o.total - o.finalizada; o.avance_pct = Math.round((o.finalizada / o.total) * 100); }
+      return [...g.values()].sort((a, b) => b.por_cerrar - a.por_cerrar || b.total - a.total || a.tecnico.localeCompare(b.tecnico));
+    },
+  });
+
+  dash.calc('por_fecha', {
+    inputs: ['ordenes', 'proyecto_elegido'],
+    title: 'Órdenes creadas por día',
+    description: 'Para el proyecto elegido: órdenes creadas cada día y cuántas de ellas ya están finalizadas.',
+    fn: (ordenes, proyecto) => {
+      const g = new Map();
+      for (const r of ordenes) {
+        if (r.proyecto !== proyecto) continue;
+        const n = Number(r.ordenes);
+        if (!g.has(r.fecha_creacion)) g.set(r.fecha_creacion, {fecha_creacion: r.fecha_creacion, total: 0, finalizada: 0});
+        const o = g.get(r.fecha_creacion);
+        o.total += n;
+        if (r.estado === 'Finalizada') o.finalizada += n;
+      }
+      return [...g.values()].sort((a, b) => a.fecha_creacion.localeCompare(b.fecha_creacion));
+    },
+  });
+
+  dash.calc('por_modelo', {
+    inputs: ['ordenes', 'proyecto_elegido'],
+    title: 'Órdenes por tipo y modelo',
+    description: 'Para el proyecto elegido: órdenes de cada modelo de equipo y % finalizado.',
+    fn: (ordenes, proyecto) => {
+      const g = new Map();
+      for (const r of ordenes) {
+        if (r.proyecto !== proyecto) continue;
+        const n = Number(r.ordenes);
+        if (!g.has(r.modelo)) g.set(r.modelo, {tipo: r.tipo, modelo: r.modelo, total: 0, finalizada: 0, avance_pct: 0});
+        const o = g.get(r.modelo);
+        o.total += n;
+        if (r.estado === 'Finalizada') o.finalizada += n;
+      }
+      for (const o of g.values()) o.avance_pct = Math.round((o.finalizada / o.total) * 100);
+      return [...g.values()].sort((a, b) => a.tipo.localeCompare(b.tipo) || b.total - a.total);
+    },
+  });
+</script>
+
+<script>
+  // Formatos y piezas de dibujo compartidas.
+  const nf = d3.formatLocale({decimal: ',', thousands: '.', grouping: [3], currency: ['$', '']}).format(',d');
+  const es = d3.timeFormatLocale({
+    dateTime: '%A, %e de %B de %Y, %X', date: '%d/%m/%Y', time: '%H:%M:%S', periods: ['AM', 'PM'],
+    days: ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'],
+    shortDays: ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'],
+    months: ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'],
+    shortMonths: ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sept', 'oct', 'nov', 'dic'],
+  });
+  const parse = d3.utcParse('%Y-%m-%d');
+  const keys = ['finalizada', 'en_proceso', 'abierta', 'incidencia_otros'];
+  const nombres = {finalizada: 'Finalizada', en_proceso: 'En proceso', abierta: 'Abierta', incidencia_otros: 'Incidencia u otro'};
+  const colors = () => [dash.colors[0], dash.colors[1], dash.colors[2], dash.colors[3] || 'var(--cds-chart-muted)'];
+
+  window.AU = {
+    num: (v) => (v == null || Number.isNaN(Number(v)) ? '—' : nf(Number(v))),
+    dia: (s) => { const d = parse(s); return d ? es.utcFormat('%-d %b')(d) : s; },
+    fecha: (s) => { const d = parse(s); return d ? es.utcFormat('%d/%m/%Y')(d) : s; },
+    keys, nombres, colors,
+    reduceMotion: () => !window.matchMedia('(prefers-reduced-motion: no-preference)').matches,
+
+    // Mensaje en lugar del gráfico cuando no hay datos.
+    msg(el, d, vacio) {
+      el.replaceChildren();
+      const p = document.createElement('div');
+      p.className = 'au-msg';
+      p.textContent = d.status === 'error' ? 'No se pudo cargar.' : d.status === 'ok' ? vacio : '—';
+      el.append(p);
+    },
+
+    // Corta una etiqueta para que quepa en "max" píxeles.
+    fit(textEl, label, max) {
+      textEl.textContent = label;
+      if (textEl.getComputedTextLength() <= max) return;
+      let s = label;
+      while (s.length > 4 && textEl.getComputedTextLength() > max) { s = s.slice(0, -1); textEl.textContent = s.trimEnd() + '…'; }
+    },
+
+    tip(el) {
+      const t = document.createElement('div');
+      t.className = 'au-tip';
+      t.hidden = true;
+      el.append(t);
+      return {
+        show(ev, title, lines) {
+          t.replaceChildren();
+          const s = document.createElement('strong'); s.textContent = title; t.append(s);
+          for (const l of lines) { const sp = document.createElement('span'); sp.textContent = l; t.append(sp, document.createElement('br')); }
+          t.hidden = false;
+          const box = el.getBoundingClientRect();
+          let x = ev.clientX - box.left + 12, y = ev.clientY - box.top + 12;
+          if (x + t.offsetWidth > box.width) x = Math.max(0, ev.clientX - box.left - t.offsetWidth - 12);
+          t.style.left = x + 'px'; t.style.top = y + 'px';
+        },
+        hide() { t.hidden = true; },
+      };
+    },
+
+    // Barras horizontales apiladas por estado.
+    barras(el, src, campo, etiqueta, finTexto, aria) {
+      const d = dash.data(src);
+      if (d.status !== 'ok' || !Array.isArray(d.data) || !d.data.length) return AU.msg(el, d, 'Sin órdenes para este proyecto.');
+      const rows = d.data;
+      el.replaceChildren();
+      const W = Math.max(260, el.clientWidth);
+      const barH = 20, gap = 8, top = 4;
+      const H = top + rows.length * (barH + gap);
+      const svg = d3.select(el).append('svg').attr('width', '100%').attr('height', H).attr('viewBox', `0 0 ${W} ${H}`)
+        .attr('role', 'img').attr('aria-label', aria);
+      // Medir etiquetas y textos finales antes de ubicar las barras.
+      const probe = svg.append('g').attr('class', 'au-axis');
+      const pt = probe.append('text');
+      let maxL = 0;
+      for (const r of rows) { pt.text(etiqueta(r[campo])); maxL = Math.max(maxL, pt.node().getComputedTextLength()); }
+      const pe = svg.append('text').attr('class', 'au-end');
+      let maxE = 0;
+      for (const r of rows) { pe.text(finTexto(r)); maxE = Math.max(maxE, pe.node().getComputedTextLength()); }
+      probe.remove(); pe.remove();
+      const left = Math.min(maxL, W * 0.42) + 10;
+      const right = maxE + 10;
+      const x = d3.scaleLinear().domain([0, d3.max(rows, (r) => r.total) || 1]).range([0, Math.max(40, W - left - right)]);
+      const c = AU.colors();
+      const tip = AU.tip(el);
+      const g = svg.append('g');
+      rows.forEach((r, i) => {
+        const y = top + i * (barH + gap);
+        const lbl = g.append('text').attr('class', 'au-lbl').attr('x', left - 10).attr('y', y + barH / 2).attr('dy', '0.35em').attr('text-anchor', 'end');
+        AU.fit(lbl.node(), etiqueta(r[campo]), left - 10);
+        let x0 = 0;
+        AU.keys.forEach((k, j) => {
+          const v = Number(r[k]) || 0;
+          if (!v) return;
+          g.append('rect').attr('x', left + x(x0)).attr('y', y).attr('height', barH).attr('width', Math.max(1, x(v)))
+            .style('fill', c[j])
+            .on('pointermove', (ev) => tip.show(ev, etiqueta(r[campo]), [`${AU.nombres[k]}: ${AU.num(v)} de ${AU.num(r.total)}`, `Finalizado: ${r.avance_pct}%`]))
+            .on('pointerleave', () => tip.hide());
+          x0 += v;
+        });
+        g.append('text').attr('class', 'au-end').attr('x', left + x(r.total) + 6).attr('y', y + barH / 2).attr('dy', '0.35em').text(finTexto(r));
+      });
+    },
+  };
+
+  // Números y palabras sueltas.
+  dash.draw('num', (el) => {
+    const d = dash.data(el.dataset.source);
+    const row = d.status === 'ok' && Array.isArray(d.data) ? d.data[Number(el.dataset.row || 0)] : null;
+    el.classList.toggle('dash-skeleton', d.status === 'loading');
+    el.textContent = row ? AU.num(row[el.dataset.field]) : '—';
+  });
+  dash.draw('txt', (el) => {
+    const d = dash.data(el.dataset.source);
+    const row = d.status === 'ok' && Array.isArray(d.data) ? d.data[Number(el.dataset.row || 0)] : null;
+    el.textContent = row && row[el.dataset.field] != null ? String(row[el.dataset.field]) : '—';
+  });
+
+  dash.draw('avance', (el) => {
+    const d = dash.data('kpis');
+    const k = d.status === 'ok' && d.data && d.data[0];
+    el.replaceChildren();
+    const bar = document.createElement('div');
+    bar.style.width = (k ? Math.min(100, k.avance_pct) : 0) + '%';
+    bar.style.background = AU.colors()[0];
+    el.append(bar);
+  });
+
+  // Filtro de proyecto: sus opciones vienen de los datos.
+  dash.draw('proyecto', (sel) => {
+    const p = dash.data('proyectos');
+    const elegido = dash.data('proyecto_elegido');
+    const rows = p.status === 'ok' && Array.isArray(p.data) ? p.data : [];
+    sel.replaceChildren(...rows.map((r) => new Option(`${r.proyecto} (${AU.num(r.total)})`, r.proyecto)));
+    if (elegido.status === 'ok' && elegido.data) sel.value = elegido.data;
+    sel.onchange = () => dash.setParams({proyecto: sel.value || null, estado_pend: null});
+  });
+
+  dash.draw('barras-sucursal', (el) => AU.barras(el, 'por_sucursal', 'sucursal', (v) => v, (r) => `${AU.num(r.total)} · ${r.avance_pct}%`,
+    'Barras apiladas: órdenes de cada sucursal por estado, con total y porcentaje finalizado.'));
+
+  dash.draw('barras-tecnico', (el) => AU.barras(el, 'por_tecnico', 'tecnico', (v) => (v === 'Pendiente' ? 'Pendiente (sin técnico)' : v),
+    (r) => (r.por_cerrar ? `${AU.num(r.por_cerrar)} por cerrar` : 'al día'),
+    'Barras apiladas: órdenes de cada técnico por estado, con las que le quedan por cerrar.'));
+
+  // Columnas por día de creación.
+  dash.draw('barras-dia', (el) => {
+    const d = dash.data('por_fecha');
+    if (d.status !== 'ok' || !Array.isArray(d.data) || !d.data.length) return AU.msg(el, d, 'Sin órdenes para este proyecto.');
+    const rows = d.data;
+    el.replaceChildren();
+    const W = Math.max(260, el.clientWidth), H = 240, m = {top: 18, right: 4, bottom: 24, left: 4};
+    const svg = d3.select(el).append('svg').attr('width', '100%').attr('height', H).attr('viewBox', `0 0 ${W} ${H}`)
+      .attr('role', 'img').attr('aria-label', 'Columnas: órdenes creadas cada día y cuántas están finalizadas.');
+    const x = d3.scaleBand().domain(rows.map((r) => r.fecha_creacion)).range([m.left, W - m.right]).padding(0.2);
+    const y = d3.scaleLinear().domain([0, d3.max(rows, (r) => r.total) || 1]).nice().range([H - m.bottom, m.top]);
+    const c = AU.colors();
+    const tip = AU.tip(el);
+    svg.append('line').attr('class', 'au-base').attr('x1', m.left).attr('x2', W - m.right).attr('y1', H - m.bottom).attr('y2', H - m.bottom);
+    const g = svg.append('g').selectAll('g').data(rows).join('g');
+    g.append('rect').attr('x', (r) => x(r.fecha_creacion)).attr('width', x.bandwidth())
+      .attr('y', (r) => y(r.total)).attr('height', (r) => y(0) - y(r.total))
+      .style('fill', 'none').style('stroke', c[0]).style('stroke-width', 1);
+    g.append('rect').attr('x', (r) => x(r.fecha_creacion)).attr('width', x.bandwidth())
+      .attr('y', (r) => y(r.finalizada)).attr('height', (r) => y(0) - y(r.finalizada)).style('fill', c[0]);
+    g.append('rect').attr('x', (r) => x(r.fecha_creacion)).attr('width', x.bandwidth()).attr('y', m.top).attr('height', H - m.bottom - m.top)
+      .style('fill', 'transparent')
+      .on('pointermove', (ev, r) => tip.show(ev, AU.fecha(r.fecha_creacion), [`Creadas: ${AU.num(r.total)}`, `Finalizadas: ${AU.num(r.finalizada)}`]))
+      .on('pointerleave', () => tip.hide());
+    if (x.bandwidth() >= 16) {
+      g.append('text').attr('class', 'au-end').attr('text-anchor', 'middle')
+        .attr('x', (r) => x(r.fecha_creacion) + x.bandwidth() / 2).attr('y', (r) => y(r.total) - 4).text((r) => AU.num(r.total));
+    }
+    // Etiquetas de fecha sin que se topen.
+    const ax = svg.append('g').attr('class', 'au-axis');
+    let lastEnd = -Infinity;
+    for (const r of rows) {
+      const cx = x(r.fecha_creacion) + x.bandwidth() / 2;
+      const t = ax.append('text').attr('x', cx).attr('y', H - m.bottom + 16).attr('text-anchor', 'middle').text(AU.dia(r.fecha_creacion));
+      const w = t.node().getComputedTextLength();
+      if (cx - w / 2 < lastEnd + 6 || cx - w / 2 < 0 || cx + w / 2 > W) t.remove(); else lastEnd = cx + w / 2;
+    }
+  });
+
+  dash.draw('tabla-modelo', (tb) => {
+    const d = dash.data('por_modelo');
+    const rows = d.status === 'ok' && Array.isArray(d.data) ? d.data : [];
+    d3.select(tb).selectAll('tr').data(rows, (r) => r.modelo).join('tr')
+      .attr('data-key', (r) => r.modelo)
+      .each(function (r) {
+        const tds = [r.tipo, r.modelo, AU.num(r.total), AU.num(r.finalizada), `${r.avance_pct}%`];
+        d3.select(this).selectAll('td').data(tds).join('td').attr('class', (v, i) => (i >= 2 ? 'au-r' : i === 1 ? 'au-wrap' : null)).text((v) => v);
+      });
+  });
+
+  // Filtro por estado de la tabla de órdenes por cerrar.
+  dash.draw('filtro-estado', (sel) => {
+    const d = dash.data('pendientes');
+    const e = dash.data('proyecto_elegido');
+    const proyecto = e.status === 'ok' ? e.data : null;
+    const estados = d.status === 'ok' ? [...new Set(d.data.filter((r) => r.proyecto === proyecto).map((r) => r.estado))].sort() : [];
+    sel.replaceChildren(new Option('Todos los estados', ''), ...estados.map((s) => new Option(s, s)));
+    const v = dash.params().estado_pend || '';
+    sel.value = estados.includes(v) ? v : '';
+    sel.onchange = () => dash.setParams({estado_pend: sel.value || null});
+  });
+
+  dash.draw('tabla-pendientes', (tb) => {
+    const d = dash.data('pendientes');
+    const e = dash.data('proyecto_elegido');
+    const proyecto = e.status === 'ok' ? e.data : null;
+    const estado = dash.params().estado_pend || '';
+    const orden = {Abierta: 0, Incidencia: 1, 'En Proceso': 2};
+    const rows = (d.status === 'ok' && Array.isArray(d.data) ? d.data : [])
+      .filter((r) => r.proyecto === proyecto && (!estado || r.estado === estado))
+      .sort((a, b) => (a.tecnico === 'Pendiente' ? 0 : 1) - (b.tecnico === 'Pendiente' ? 0 : 1)
+        || (orden[a.estado] ?? 3) - (orden[b.estado] ?? 3)
+        || a.fecha_creacion.localeCompare(b.fecha_creacion) || Number(a.codigo) - Number(b.codigo));
+    d3.select(tb).selectAll('tr').data(rows, (r) => r.codigo).join('tr')
+      .attr('data-key', (r) => r.codigo)
+      .each(function (r) {
+        const tds = [
+          {v: String(r.codigo)}, {v: r.sucursal}, {v: r.tecnico, c: r.tecnico === 'Pendiente' ? 'au-warn' : null},
+          {v: r.modelo}, {v: r.serial}, {v: r.estado, c: r.estado === 'Incidencia' ? 'au-bad' : null}, {v: AU.fecha(r.fecha_creacion)},
+        ];
+        d3.select(this).selectAll('td').data(tds).join('td').attr('class', (t) => t.c).text((t) => t.v);
+      });
+  });
+
+  // Muestra u oculta lo que depende de si hay incidencias, y pinta la leyenda.
+  dash.onData(() => {
+    const d = dash.data('kpis');
+    const k = d.status === 'ok' && Array.isArray(d.data) ? d.data[0] : null;
+    document.querySelectorAll('.au-solo-inc').forEach((n) => { n.hidden = !(k && k.incidencia > 0); });
+    document.querySelectorAll('#kpi-otros').forEach((n) => { n.hidden = !(k && k.incidencia_otros > 0); });
+    const c = AU.colors();
+    document.querySelectorAll('.au-sw[data-sw]').forEach((n) => { n.style.background = c[Number(n.dataset.sw)]; });
+  });
+</script>
+
+</div>
+<script>
+  // Descifra los datos con la llave que viene al final del link (#k=...) y los vuelve a leer cada 5 minutos.
+  (async () => {
+    const bloqueo = document.getElementById('sitio-bloqueo');
+    const bloqueoMsg = document.getElementById('sitio-bloqueo-msg');
+    const estado = document.getElementById('sitio-estado');
+    const pagina = document.querySelector('.au-page');
+    const lock = (msg) => { pagina.hidden = true; estado.hidden = true; bloqueo.hidden = false; bloqueoMsg.textContent = msg; };
+    const bytes = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+    const b64url = (s) => bytes(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4));
+    const k = new URLSearchParams(location.hash.slice(1)).get('k');
+    if (!k) return lock('Para ver este panel necesitas el link completo, con la llave al final.');
+    let key;
+    try { key = await crypto.subtle.importKey('raw', b64url(k), 'AES-GCM', false, ['decrypt']); }
+    catch (e) { return lock('El link está incompleto o la llave no es válida.'); }
+    let ultimo = null;
+    const hora = (iso) => new Date(iso).toLocaleString('es-CL', {timeZone: 'America/Santiago', dateStyle: 'short', timeStyle: 'short'});
+    async function leer() {
+      const r = await fetch('data.enc?t=' + Date.now(), {cache: 'no-store'});
+      if (!r.ok) throw new Error('No se pudo leer el archivo de datos (' + r.status + ').');
+      const enc = await r.json();
+      const plano = await crypto.subtle.decrypt({name: 'AES-GCM', iv: bytes(enc.iv)}, key, bytes(enc.ct));
+      return JSON.parse(new TextDecoder().decode(plano));
+    }
+    async function tick() {
+      try {
+        const datos = await leer();
+        estado.textContent = `Datos de Aurora al ${hora(datos.generado)} · se actualizan cada hora (lun–vie, 8:00–19:00)`;
+        if (datos.generado === ultimo) return;
+        ultimo = datos.generado;
+        bloqueo.hidden = true; estado.hidden = false; pagina.hidden = false;
+        dash._set(datos);
+      } catch (e) {
+        if (!ultimo) return lock(e.name === 'OperationError' ? 'Este link ya no es válido: la llave cambió. Pide el link nuevo.' : String(e.message || e));
+        estado.textContent = `No se pudo actualizar (${e.message || e}); se muestran los datos al ${hora(ultimo)}.`;
+      }
+    }
+    await tick();
+    setInterval(tick, 5 * 60 * 1000);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
+    let t;
+    addEventListener('resize', () => { clearTimeout(t); t = setTimeout(() => dash._redraw(), 150); });
+  })();
+</script>
+</body>
+</html>
